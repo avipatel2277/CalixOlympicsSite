@@ -14,6 +14,8 @@ const multer = require("multer");
 const path = require("path");
 const { MongoClient } = require("mongodb");
 const crypto = require("crypto");
+const { PublicKey } = require("@solana/web3.js");
+const nacl = require("tweetnacl");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,6 +26,8 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
 const MONGODB_URI = process.env.MONGODB_URI || "";
 const USE_MONGODB = MONGODB_URI.length > 0;
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const SOLANA_MINT_KEYPAIR_B58 = process.env.SOLANA_MINT_KEYPAIR || "";
 
 let db = null;
 if (USE_MONGODB) {
@@ -89,17 +93,142 @@ function getOrCreateAnonId(req, res, next) {
   next();
 }
 
+/* Achievement definitions: id, name, description, check(diet, activity, goals) -> boolean */
+const ACHIEVEMENTS = [
+  {
+    id: "first_food",
+    name: "First Bite",
+    description: "Log your first food entry"
+  },
+  {
+    id: "first_activity",
+    name: "First Move",
+    description: "Log your first activity"
+  },
+  {
+    id: "streak_3",
+    name: "3-Day Streak",
+    description: "Log food or activity 3 days in a row"
+  },
+  {
+    id: "streak_7",
+    name: "Week Warrior",
+    description: "Log food or activity 7 days in a row"
+  },
+  {
+    id: "ten_activities",
+    name: "Active Ten",
+    description: "Log 10 activity sessions"
+  },
+  {
+    id: "protein_goal_5",
+    name: "Protein Pro",
+    description: "Hit your protein goal 5 days"
+  },
+  {
+    id: "calorie_goal_5",
+    name: "Calorie Champion",
+    description: "Hit your calorie goal 5 days"
+  },
+  {
+    id: "activity_goal_5",
+    name: "Movement Master",
+    description: "Hit your activity goal 5 days"
+  }
+];
+
+function getOrderedDates(diet, activity) {
+  const dates = new Set([...(Object.keys(diet || {})), ...(Object.keys(activity || {}))]);
+  return Array.from(dates).sort();
+}
+
+function computeAchievementsEarned(diet, activity, goals) {
+  const earned = [];
+  const dietDates = Object.keys(diet || {});
+  const activityDates = Object.keys(activity || {});
+  const allDates = getOrderedDates(diet, activity);
+  const calorieGoal = goals?.calorieGoal ?? 2000;
+  const proteinGoal = goals?.proteinGoal ?? 50;
+  const activityGoal = goals?.activityGoal ?? 30;
+
+  const totalFoodEntries = dietDates.reduce((sum, d) => sum + (diet[d]?.length || 0), 0);
+  const totalActivitySessions = activityDates.reduce((sum, d) => sum + (activity[d]?.length || 0), 0);
+
+  if (totalFoodEntries > 0) earned.push("first_food");
+  if (totalActivitySessions > 0) earned.push("first_activity");
+  if (totalActivitySessions >= 10) earned.push("ten_activities");
+
+  let streak = 0;
+  const sortedDates = allDates.slice().sort();
+  for (let i = sortedDates.length - 1; i >= 0; i--) {
+    const d = sortedDates[i];
+    const hasFood = (diet[d]?.length || 0) > 0;
+    const hasActivity = (activity[d]?.length || 0) > 0;
+    if (hasFood || hasActivity) streak++;
+    else break;
+  }
+  if (streak >= 3) earned.push("streak_3");
+  if (streak >= 7) earned.push("streak_7");
+
+  let proteinDays = 0;
+  let calorieDays = 0;
+  let activityMinutesDays = 0;
+  for (const d of dietDates) {
+    const entries = diet[d] || [];
+    const protein = entries.reduce((s, e) => s + (Number(e.protein) || 0), 0);
+    const calories = entries.reduce((s, e) => s + (Number(e.calories) || 0), 0);
+    if (protein >= proteinGoal) proteinDays++;
+    if (calories >= calorieGoal * 0.9 && calories <= calorieGoal * 1.1) calorieDays++;
+  }
+  for (const d of activityDates) {
+    const entries = activity[d] || [];
+    const minutes = entries.reduce((s, e) => s + (Number(e.duration) || 0), 0);
+    if (minutes >= activityGoal) activityMinutesDays++;
+  }
+  if (proteinDays >= 5) earned.push("protein_goal_5");
+  if (calorieDays >= 5) earned.push("calorie_goal_5");
+  if (activityMinutesDays >= 5) earned.push("activity_goal_5");
+
+  return [...new Set(earned)];
+}
+
 /* GET /api/data – load diet, activity, goals for this anonymous user (MongoDB) */
 app.get("/api/data", getOrCreateAnonId, async (req, res) => {
   if (!db) return res.status(503).json({ error: "MongoDB not configured. Set MONGODB_URI in .env to enable sync." });
   try {
     const col = db.collection("appdata");
     const doc = await col.findOne({ _id: req.anonId });
+    const diet = doc?.diet || {};
+    const activity = doc?.activity || {};
+    const goals = doc?.goals ?? null;
+    const goalStory = doc?.goalStory || "";
+    const walletAddress = doc?.walletAddress || null;
+    const storedMinted = doc?.achievementsMinted || [];
+    const earned = computeAchievementsEarned(diet, activity, goals);
+    const earnedSet = new Set(earned);
+    const minted = storedMinted.filter((id) => earnedSet.has(id));
+    if (minted.length !== storedMinted.length || storedMinted.some((id) => !earnedSet.has(id))) {
+      await col.updateOne(
+        { _id: req.anonId },
+        { $set: { achievementsEarned: earned, achievementsMinted: minted, updatedAt: new Date() } },
+        { upsert: true }
+      );
+    } else if (doc && (doc.achievementsEarned === undefined || doc.achievementsMinted === undefined)) {
+      await col.updateOne(
+        { _id: req.anonId },
+        { $set: { achievementsEarned: earned, achievementsMinted: minted, updatedAt: new Date() } },
+        { upsert: true }
+      );
+    }
     res.json({
-      diet: doc?.diet || {},
-      activity: doc?.activity || {},
-      goals: doc?.goals ?? null,
-      goalStory: doc?.goalStory || ""
+      diet,
+      activity,
+      goals,
+      goalStory,
+      walletAddress,
+      achievementsEarned: earned,
+      achievementsMinted: minted,
+      achievementsMeta: ACHIEVEMENTS
     });
   } catch (err) {
     console.error("GET /api/data error:", err);
@@ -124,6 +253,128 @@ app.put("/api/data", getOrCreateAnonId, async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to save data." });
   }
 });
+
+/* POST /api/link-wallet – verify signature and link Solana wallet to anon_id */
+app.post("/api/link-wallet", getOrCreateAnonId, async (req, res) => {
+  if (!db) return res.status(503).json({ error: "MongoDB not configured." });
+  const { publicKey, message, signature } = req.body || {};
+  if (!publicKey || !message || !signature) {
+    return res.status(400).json({ error: "Missing publicKey, message, or signature." });
+  }
+  try {
+    const msgBytes = Buffer.from(String(message), "utf8");
+    const sigBytes = Buffer.isBuffer(signature) ? signature : Buffer.from(signature, "base64");
+    const pk = new PublicKey(publicKey);
+    const pkBytes = pk.toBytes();
+    if (sigBytes.length !== 64) {
+      return res.status(400).json({ error: "Invalid signature length." });
+    }
+    const valid = nacl.sign.detached.verify(msgBytes, sigBytes, pkBytes);
+    if (!valid) return res.status(401).json({ error: "Invalid signature." });
+    const col = db.collection("appdata");
+    await col.updateOne(
+      { _id: req.anonId },
+      { $set: { walletAddress: publicKey, updatedAt: new Date() } },
+      { upsert: true }
+    );
+    res.json({ ok: true, walletAddress: publicKey });
+  } catch (err) {
+    console.error("POST /api/link-wallet error:", err);
+    res.status(500).json({ error: err.message || "Failed to link wallet." });
+  }
+});
+
+/* POST /api/disconnect-wallet – remove wallet link for this anon_id */
+app.post("/api/disconnect-wallet", getOrCreateAnonId, async (req, res) => {
+  if (!db) return res.status(503).json({ error: "MongoDB not configured." });
+  try {
+    const col = db.collection("appdata");
+    await col.updateOne(
+      { _id: req.anonId },
+      { $unset: { walletAddress: "" }, $set: { updatedAt: new Date() } }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /api/disconnect-wallet error:", err);
+    res.status(500).json({ error: err.message || "Failed to disconnect wallet." });
+  }
+});
+
+/* POST /api/mint-achievement – mint achievement NFT to linked wallet (optional: requires SOLANA_MINT_KEYPAIR) */
+app.post("/api/mint-achievement", getOrCreateAnonId, async (req, res) => {
+  if (!db) return res.status(503).json({ error: "MongoDB not configured." });
+  const { achievementId } = req.body || {};
+  if (!achievementId) return res.status(400).json({ error: "Missing achievementId." });
+  try {
+    const col = db.collection("appdata");
+    const doc = await col.findOne({ _id: req.anonId });
+    const walletAddress = doc?.walletAddress;
+    const earned = doc?.achievementsEarned || computeAchievementsEarned(doc?.diet || {}, doc?.activity || {}, doc?.goals);
+    const minted = doc?.achievementsMinted || [];
+    if (!walletAddress) return res.status(400).json({ error: "Connect a Solana wallet first." });
+    if (!earned.includes(achievementId)) return res.status(400).json({ error: "Achievement not earned." });
+    if (minted.includes(achievementId)) return res.status(400).json({ error: "Already minted." });
+    const meta = ACHIEVEMENTS.find((a) => a.id === achievementId);
+    if (!meta) return res.status(400).json({ error: "Unknown achievement." });
+    if (!SOLANA_MINT_KEYPAIR_B58) {
+      return res.status(503).json({
+        error: "NFT minting not configured. Set SOLANA_MINT_KEYPAIR in .env to enable (base58 secret key)."
+      });
+    }
+    const mintNft = await getMintNftHandler();
+    if (!mintNft) {
+      return res.status(503).json({
+        error: "NFT minting not available. Install @metaplex-foundation/js and fund the mint keypair for devnet/mainnet."
+      });
+    }
+    const txSignature = await mintNft(walletAddress, meta);
+    await col.updateOne(
+      { _id: req.anonId },
+      { $addToSet: { achievementsMinted: achievementId }, $set: { updatedAt: new Date() } }
+    );
+    res.json({ ok: true, signature: txSignature });
+  } catch (err) {
+    console.error("POST /api/mint-achievement error:", err);
+    res.status(500).json({ error: err.message || "Mint failed." });
+  }
+});
+
+function getMintNftHandler() {
+  try {
+    const { Connection, Keypair } = require("@solana/web3.js");
+    const bs58 = require("bs58");
+    const { Metaplex, keypairIdentity } = require("@metaplex-foundation/js");
+    const keypairBytes = bs58.decode(SOLANA_MINT_KEYPAIR_B58);
+    const payer = Keypair.fromSecretKey(keypairBytes);
+    const connection = new Connection(SOLANA_RPC_URL);
+    const metaplex = Metaplex.make(connection).use(keypairIdentity(payer));
+    return async (toWalletAddress, achievementMeta) => {
+      const toPubkey = new PublicKey(toWalletAddress);
+      let uri;
+      try {
+        const up = await metaplex.nfts().uploadMetadata({
+          name: achievementMeta.name,
+          description: achievementMeta.description
+        });
+        uri = up.uri;
+      } catch (_) {
+        uri = "data:application/json," + encodeURIComponent(JSON.stringify({
+          name: achievementMeta.name,
+          description: achievementMeta.description
+        }));
+      }
+      const { nft } = await metaplex.nfts().create({
+        uri,
+        name: achievementMeta.name,
+        symbol: "CALIX",
+        sellerFeeBasisPoints: 0
+      }, { recipient: toPubkey });
+      return nft.address.toBase58();
+    };
+  } catch (_) {
+    return null;
+  }
+}
 
 app.post("/api/text-to-speech", async (req, res) => {
   if (!ELEVENLABS_API_KEY) {

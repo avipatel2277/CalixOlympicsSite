@@ -18,6 +18,12 @@
           <h1>CalixOlympics</h1>
           <p class="tagline">Track food & activity. Chat with Calixo. Get suggestions that fit your goals.</p>
         </div>
+        <div class="header-wallet" id="header-wallet">
+          <span class="wallet-status" id="wallet-status"></span>
+          <button type="button" class="btn btn-wallet hidden" id="wallet-connect-btn" title="Connect Solana wallet">Connect wallet</button>
+          <span class="wallet-address hidden" id="wallet-address"></span>
+          <button type="button" class="btn btn-wallet btn-wallet-disconnect hidden" id="wallet-disconnect-btn" title="Disconnect wallet">Disconnect</button>
+        </div>
         <button type="button" class="btn btn-stop-audio hidden" id="stop-audio-btn" title="Stop playback" aria-label="Stop playback">
           <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>
           <span>Stop</span>
@@ -115,6 +121,11 @@
         <div class="dashboard-suggestions">
           <h3>Suggestions</h3>
           <ul class="suggestions-list" id="dashboard-suggestions-list"></ul>
+        </div>
+        <div class="achievements-section" id="achievements-section">
+          <h3>Achievements</h3>
+          <p class="achievements-intro">Earn badges by logging food and activity. Connect a Solana wallet to mint them as NFTs.</p>
+          <ul class="achievements-list" id="achievements-list"></ul>
         </div>
       </section>
 

@@ -6,6 +6,10 @@ const DEFAULT_ACTIVITY_GOAL = 30;
 const API_BASE = "";
 
 let mongodbAvailable = null;
+let walletAddress = null;
+let achievementsEarned = [];
+let achievementsMinted = [];
+let achievementsMeta = [];
 
 function setMongodbAvailable(available) {
   mongodbAvailable = !!available;
@@ -1021,6 +1025,133 @@ function refreshAll() {
   renderGoalsForm(data);
 }
 
+function renderWalletUI() {
+  const statusEl = document.getElementById("wallet-status");
+  const connectBtn = document.getElementById("wallet-connect-btn");
+  const addressEl = document.getElementById("wallet-address");
+  const disconnectBtn = document.getElementById("wallet-disconnect-btn");
+  if (!statusEl || !connectBtn || !addressEl || !disconnectBtn) return;
+  if (walletAddress) {
+    statusEl.textContent = "";
+    connectBtn.classList.add("hidden");
+    addressEl.textContent = `${walletAddress.slice(0, 4)}…${walletAddress.slice(-4)}`;
+    addressEl.classList.remove("hidden");
+    disconnectBtn.classList.remove("hidden");
+  } else {
+    statusEl.textContent = "";
+    connectBtn.classList.remove("hidden");
+    addressEl.classList.add("hidden");
+    disconnectBtn.classList.add("hidden");
+  }
+}
+
+function renderAchievements() {
+  const listEl = document.getElementById("achievements-list");
+  if (!listEl) return;
+  const meta = achievementsMeta || [];
+  if (meta.length === 0) {
+    listEl.innerHTML = '<li class="empty-state">Achievements will appear here as you log food and activity.</li>';
+    return;
+  }
+  listEl.innerHTML = meta
+    .map((a) => {
+      const earned = (achievementsEarned || []).includes(a.id);
+      const minted = (achievementsMinted || []).includes(a.id);
+      let action = "";
+      if (earned && minted) action = '<span class="achievement-minted">Minted</span>';
+      else if (earned && walletAddress)
+        action = `<button type="button" class="btn btn-mint" data-achievement-id="${a.id}" title="Mint as NFT">Mint NFT</button>`;
+      else if (earned) action = '<span class="achievement-locked">Connect wallet to mint</span>';
+      else action = '<span class="achievement-locked">—</span>';
+      return `<li class="achievement-item ${earned ? "earned" : ""}">
+        <div class="achievement-info"><strong>${a.name}</strong><span class="achievement-desc">${a.description}</span></div>
+        <div class="achievement-action">${action}</div>
+      </li>`;
+    })
+    .join("");
+  listEl.querySelectorAll(".btn-mint").forEach((btn) => {
+    btn.addEventListener("click", () => mintAchievement(btn.dataset.achievementId));
+  });
+}
+
+function getSolanaProvider() {
+  if (typeof window === "undefined") return null;
+  if (window.phantom?.solana?.isPhantom) return window.phantom.solana;
+  if (window.solflare?.isSolflare) return window.solflare;
+  return null;
+}
+
+async function linkWallet() {
+  const provider = getSolanaProvider();
+  if (!provider) {
+    alert("Install Phantom or Solflare to connect a Solana wallet.");
+    return;
+  }
+  const connectBtn = document.getElementById("wallet-connect-btn");
+  if (connectBtn) connectBtn.disabled = true;
+  try {
+    const resp = await provider.connect();
+    const publicKey = resp.publicKey?.toString?.() || resp.publicKey;
+    if (!publicKey) throw new Error("No public key returned.");
+    const message = `Link CalixOlympics to this wallet at ${Date.now()}`;
+    const msgBytes = new TextEncoder().encode(message);
+    const { signature } = await provider.signMessage(msgBytes);
+    const sigBytes = signature instanceof Uint8Array ? signature : new Uint8Array(signature);
+    const signatureBase64 = btoa(String.fromCharCode.apply(null, sigBytes));
+    const res = await fetch(`${API_BASE}/api/link-wallet`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicKey, message, signature: signatureBase64 })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Failed to link wallet.");
+    walletAddress = data.walletAddress || publicKey;
+    renderWalletUI();
+    renderAchievements();
+    syncFromServer();
+  } catch (err) {
+    alert(err.message || "Could not connect wallet.");
+  } finally {
+    if (connectBtn) connectBtn.disabled = false;
+  }
+}
+
+async function disconnectWallet() {
+  try {
+    const res = await fetch(`${API_BASE}/api/disconnect-wallet`, { method: "POST", credentials: "include" });
+    if (!res.ok) throw new Error("Failed to disconnect.");
+    walletAddress = null;
+    renderWalletUI();
+    renderAchievements();
+    syncFromServer();
+  } catch (err) {
+    alert(err.message || "Could not disconnect.");
+  }
+}
+
+async function mintAchievement(achievementId) {
+  const btn = document.querySelector(`.btn-mint[data-achievement-id="${achievementId}"]`);
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/mint-achievement`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ achievementId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Mint failed.");
+    achievementsMinted = [...(achievementsMinted || []), achievementId];
+    renderAchievements();
+    syncFromServer();
+  } catch (err) {
+    alert(err.message || "Could not mint NFT.");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function syncFromServer() {
   if (mongodbAvailable === false) return;
   fetch(`${API_BASE}/api/data`, { method: "GET", credentials: "include" })
@@ -1030,13 +1161,19 @@ function syncFromServer() {
     })
     .then((payload) => {
       if (payload) setMongodbAvailable(true);
+      if (payload) {
+        walletAddress = payload.walletAddress || null;
+        achievementsEarned = payload.achievementsEarned || [];
+        achievementsMinted = payload.achievementsMinted || [];
+        achievementsMeta = payload.achievementsMeta || [];
+      }
       const hasData =
         payload &&
         (Object.keys(payload.diet || {}).length > 0 ||
           Object.keys(payload.activity || {}).length > 0 ||
           payload.goals != null ||
           (payload.goalStory && String(payload.goalStory).trim().length > 0));
-      if (hasData) {
+      if (hasData && payload) {
         const data = {
           diet: payload.diet || {},
           activity: payload.activity || {},
@@ -1046,6 +1183,8 @@ function syncFromServer() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
         refreshAll();
       }
+      renderWalletUI();
+      renderAchievements();
     })
     .catch(() => setMongodbAvailable(false));
 }
@@ -1891,5 +2030,11 @@ setupChatMic("goals-chat-mic", "goals-chat-mic-label", "goals-chat-status", "goa
 
 fetchHealth();
 initTabs();
+const walletConnectBtn = document.getElementById("wallet-connect-btn");
+const walletDisconnectBtn = document.getElementById("wallet-disconnect-btn");
+if (walletConnectBtn) walletConnectBtn.addEventListener("click", linkWallet);
+if (walletDisconnectBtn) walletDisconnectBtn.addEventListener("click", disconnectWallet);
 refreshAll();
+renderWalletUI();
+renderAchievements();
 syncFromServer();
