@@ -5,6 +5,21 @@ const DEFAULT_ACTIVITY_GOAL = 30;
 
 const API_BASE = "";
 
+let mongodbAvailable = null;
+
+function setMongodbAvailable(available) {
+  mongodbAvailable = !!available;
+}
+
+function fetchHealth() {
+  fetch(`${API_BASE}/api/health`, { credentials: "include" })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((h) => {
+      if (h && typeof h.mongodb === "boolean") setMongodbAvailable(h.mongodb);
+    })
+    .catch(() => setMongodbAvailable(false));
+}
+
 function getToday() {
   const d = new Date();
   const y = d.getFullYear();
@@ -47,17 +62,23 @@ function saveGoals(data, goals, story = "") {
 
 function saveData(data) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  if (mongodbAvailable === false) return;
   fetch(`${API_BASE}/api/data`, {
     method: "PUT",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ 
-      diet: data.diet || {}, 
-      activity: data.activity || {}, 
+    body: JSON.stringify({
+      diet: data.diet || {},
+      activity: data.activity || {},
       goals: data.goals ?? null,
       goalStory: data.goalStory || ""
     })
-  }).catch(() => {});
+  })
+    .then((res) => {
+      if (res.ok) setMongodbAvailable(true);
+      else if (res.status === 503) setMongodbAvailable(false);
+    })
+    .catch(() => setMongodbAvailable(false));
 }
 
 function getDietToday(data) {
@@ -441,6 +462,8 @@ function fetchSuggestions(data) {
     .catch(() => getSuggestions(data));
 }
 
+let lastRenderedSuggestions = [];
+
 function renderSuggestions(data) {
   const el = document.getElementById("suggestions-list");
   const dashEl = document.getElementById("dashboard-suggestions-list");
@@ -448,21 +471,67 @@ function renderSuggestions(data) {
   if (dashEl) dashEl.innerHTML = '<li class="empty-state">Loading suggestions…</li>';
 
   fetchSuggestions(data).then((suggestions) => {
-    renderSuggestionsInto(el, suggestions);
-    renderSuggestionsInto(dashEl, suggestions);
+    lastRenderedSuggestions = suggestions || [];
+    renderSuggestionsInto(el, lastRenderedSuggestions);
+    renderSuggestionsInto(dashEl, lastRenderedSuggestions);
   });
+}
+
+function ensureGoalsChatSeeded() {
+  const messages = getGoalsChatMessages();
+  if (messages.length === 0) {
+    const welcome = [{ role: "assistant", content: CALIXO_WELCOME }];
+    saveGoalsChatMessages(welcome);
+    renderGoalsChatMessages(welcome);
+  } else {
+    renderGoalsChatMessages(messages);
+  }
+}
+
+function ensureTalkCalixoSeeded() {
+  let messages = getTalkChatMessages();
+  if (messages.length === 0) {
+    const welcome = [{ role: "assistant", content: CALIXO_WELCOME }];
+    saveTalkChatMessages(welcome);
+    messages = welcome;
+  }
+  if (messages.length === 1 && messages[0].role === "assistant" && !sessionStorage.getItem("talkCalixoWelcomePlayed")) {
+    sessionStorage.setItem("talkCalixoWelcomePlayed", "1");
+    setTimeout(() => speakText(messages[0].content, null, () => {}), 400);
+  }
 }
 
 function initTabs() {
   document.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
-      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+      const tabId = btn.dataset.tab;
+      document.querySelectorAll(".nav-btn").forEach((b) => {
+        b.classList.remove("active");
+        b.setAttribute("aria-selected", b.dataset.tab === tabId ? "true" : "false");
+      });
+      document.querySelectorAll(".tab-panel").forEach((p) => {
+        p.classList.remove("active");
+        p.setAttribute("aria-hidden", p.id === tabId ? "false" : "true");
+      });
       btn.classList.add("active");
-      const panel = document.getElementById(btn.dataset.tab);
-      if (panel) panel.classList.add("active");
+      btn.setAttribute("aria-selected", "true");
+      const panel = document.getElementById(tabId);
+      if (panel) {
+        panel.classList.add("active");
+        panel.setAttribute("aria-hidden", "false");
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+      if (tabId === "goals") ensureGoalsChatSeeded();
+      if (tabId === "talk-calixo") ensureTalkCalixoSeeded();
       refreshAll();
     });
+  });
+  // Set initial aria state for panels and tabs
+  document.querySelectorAll(".nav-btn").forEach((b) => {
+    b.setAttribute("aria-selected", b.classList.contains("active") ? "true" : "false");
+  });
+  document.querySelectorAll(".tab-panel").forEach((p) => {
+    p.setAttribute("aria-hidden", p.classList.contains("active") ? "false" : "true");
   });
 }
 
@@ -557,6 +626,263 @@ document.getElementById("activity-form").addEventListener("submit", (e) => {
   refreshAll();
 });
 
+/* Check if a food fits user's goals */
+function getCheckFoodContext() {
+  const data = loadData();
+  const goals = getGoals(data);
+  const dietEntries = getDietToday(data);
+  const totals = sumDiet(dietEntries);
+  return {
+    goals: { calorieGoal: goals.calorieGoal, proteinGoal: goals.proteinGoal, activityGoal: goals.activityGoal },
+    goalStory: goals.goalStory || "",
+    todayCalories: totals.calories,
+    todayProtein: totals.protein
+  };
+}
+
+async function runCheckFood(description) {
+  const desc = (description || "").trim();
+  const statusEl = document.getElementById("check-food-status");
+  const resultEl = document.getElementById("check-food-result");
+  const verdictEl = document.getElementById("check-food-verdict");
+  const assessmentEl = document.getElementById("check-food-assessment");
+  const checkBtn = document.getElementById("check-food-btn");
+  const micBtn = document.getElementById("check-food-mic");
+
+  if (!desc) {
+    if (statusEl) statusEl.textContent = "Describe the food (e.g. chicken breast 200g, a slice of pizza).";
+    return;
+  }
+
+  if (statusEl) statusEl.textContent = "Checking against your goals…";
+  if (resultEl) resultEl.classList.add("hidden");
+  if (checkBtn) checkBtn.disabled = true;
+  if (micBtn) micBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/check-food`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ foodDescription: desc, context: getCheckFoodContext() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Check failed.");
+
+    if (statusEl) statusEl.textContent = "";
+    if (verdictEl) {
+      verdictEl.textContent = data.verdict === "fits" ? "Fits your goals" : data.verdict === "avoid" ? "Doesn't fit your goals" : "Use with caution";
+      verdictEl.className = "check-food-verdict verdict-" + (data.verdict || "caution");
+    }
+    if (assessmentEl) assessmentEl.textContent = data.assessment || "";
+    if (resultEl) resultEl.classList.remove("hidden");
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Error: " + (err.message || "Could not check.");
+    if (resultEl) resultEl.classList.add("hidden");
+  } finally {
+    if (checkBtn) checkBtn.disabled = false;
+    if (micBtn) micBtn.disabled = false;
+  }
+}
+
+document.getElementById("check-food-btn").addEventListener("click", () => {
+  const input = document.getElementById("check-food-input");
+  runCheckFood(input?.value);
+});
+
+document.getElementById("check-food-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const input = document.getElementById("check-food-input");
+    runCheckFood(input?.value);
+  }
+});
+
+document.getElementById("check-food-mic").addEventListener("click", async function checkFoodMicClick() {
+  const micBtn = this;
+  const labelEl = document.getElementById("check-food-mic-label");
+  const statusEl = document.getElementById("check-food-status");
+  const inputEl = document.getElementById("check-food-input");
+
+  if (voiceRecording.active && voiceRecording.mode === "check-food") {
+    labelEl.textContent = "Processing…";
+    statusEl.textContent = "Transcribing…";
+    let blob;
+    try {
+      blob = await stopVoiceRecording();
+    } catch (_) {
+      labelEl.textContent = "Speak";
+      voiceRecording.mode = null;
+      statusEl.textContent = "";
+      return;
+    }
+    if (!blob || blob.size < 500) {
+      labelEl.textContent = "Speak";
+      statusEl.textContent = "No audio captured. Try again.";
+      return;
+    }
+    try {
+      const transcript = await transcribeAudio(blob);
+      if (transcript) {
+        if (inputEl) inputEl.value = transcript;
+        await runCheckFood(transcript);
+      } else {
+        statusEl.textContent = "No speech detected. Try again.";
+      }
+    } catch (err) {
+      statusEl.textContent = "Error: " + (err.message || "Transcription failed.");
+    }
+    labelEl.textContent = "Speak";
+    statusEl.textContent = "";
+    voiceRecording.mode = null;
+    return;
+  }
+
+  voiceRecording.mode = "check-food";
+  labelEl.textContent = "Stop";
+  statusEl.textContent = "Listening… Say the food (e.g. chicken breast 200 grams). Click again when done.";
+  micBtn.disabled = true;
+  startVoiceRecording()
+    .then((blobOrNull) => {
+      if (blobOrNull) return;
+      micBtn.disabled = false;
+    })
+    .catch((err) => {
+      statusEl.textContent = "Error: " + (err.message || "Microphone access denied.");
+      labelEl.textContent = "Speak";
+      voiceRecording.active = false;
+      voiceRecording.mode = null;
+      micBtn.disabled = false;
+    });
+});
+
+/* Check if an activity fits user's goals */
+function getCheckActivityContext() {
+  const data = loadData();
+  const goals = getGoals(data);
+  const activityEntries = getActivityToday(data);
+  const todayActivityMinutes = sumActivityMinutes(activityEntries);
+  return {
+    goals: { calorieGoal: goals.calorieGoal, proteinGoal: goals.proteinGoal, activityGoal: goals.activityGoal },
+    goalStory: goals.goalStory || "",
+    todayActivityMinutes
+  };
+}
+
+async function runCheckActivity(description) {
+  const desc = (description || "").trim();
+  const statusEl = document.getElementById("check-activity-status");
+  const resultEl = document.getElementById("check-activity-result");
+  const verdictEl = document.getElementById("check-activity-verdict");
+  const assessmentEl = document.getElementById("check-activity-assessment");
+  const checkBtn = document.getElementById("check-activity-btn");
+  const micBtn = document.getElementById("check-activity-mic");
+
+  if (!desc) {
+    if (statusEl) statusEl.textContent = "Describe the activity (e.g. 30 min walk, 1 hour gym).";
+    return;
+  }
+
+  if (statusEl) statusEl.textContent = "Checking against your goals…";
+  if (resultEl) resultEl.classList.add("hidden");
+  if (checkBtn) checkBtn.disabled = true;
+  if (micBtn) micBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/check-activity`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ activityDescription: desc, context: getCheckActivityContext() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Check failed.");
+
+    if (statusEl) statusEl.textContent = "";
+    if (verdictEl) {
+      verdictEl.textContent = data.verdict === "fits" ? "Fits your goals" : data.verdict === "avoid" ? "Doesn't fit your goals" : "Use with caution";
+      verdictEl.className = "check-activity-verdict verdict-" + (data.verdict || "caution");
+    }
+    if (assessmentEl) assessmentEl.textContent = data.assessment || "";
+    if (resultEl) resultEl.classList.remove("hidden");
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Error: " + (err.message || "Could not check.");
+    if (resultEl) resultEl.classList.add("hidden");
+  } finally {
+    if (checkBtn) checkBtn.disabled = false;
+    if (micBtn) micBtn.disabled = false;
+  }
+}
+
+document.getElementById("check-activity-btn").addEventListener("click", () => {
+  const input = document.getElementById("check-activity-input");
+  runCheckActivity(input?.value);
+});
+
+document.getElementById("check-activity-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const input = document.getElementById("check-activity-input");
+    runCheckActivity(input?.value);
+  }
+});
+
+document.getElementById("check-activity-mic").addEventListener("click", async function checkActivityMicClick() {
+  const micBtn = this;
+  const labelEl = document.getElementById("check-activity-mic-label");
+  const statusEl = document.getElementById("check-activity-status");
+  const inputEl = document.getElementById("check-activity-input");
+
+  if (voiceRecording.active && voiceRecording.mode === "check-activity") {
+    labelEl.textContent = "Processing…";
+    statusEl.textContent = "Transcribing…";
+    let blob;
+    try {
+      blob = await stopVoiceRecording();
+    } catch (_) {
+      labelEl.textContent = "Speak";
+      voiceRecording.mode = null;
+      statusEl.textContent = "";
+      return;
+    }
+    if (!blob || blob.size < 500) {
+      labelEl.textContent = "Speak";
+      statusEl.textContent = "No audio captured. Try again.";
+      return;
+    }
+    try {
+      const transcript = await transcribeAudio(blob);
+      if (transcript) {
+        if (inputEl) inputEl.value = transcript;
+        await runCheckActivity(transcript);
+      } else {
+        statusEl.textContent = "No speech detected. Try again.";
+      }
+    } catch (err) {
+      statusEl.textContent = "Error: " + (err.message || "Transcription failed.");
+    }
+    labelEl.textContent = "Speak";
+    statusEl.textContent = "";
+    voiceRecording.mode = null;
+    return;
+  }
+
+  voiceRecording.mode = "check-activity";
+  labelEl.textContent = "Stop";
+  statusEl.textContent = "Listening… Say the activity (e.g. 30 min walk). Click again when done.";
+  micBtn.disabled = true;
+  startVoiceRecording()
+    .then((blobOrNull) => {
+      if (blobOrNull) return;
+      micBtn.disabled = false;
+    })
+    .catch((err) => {
+      statusEl.textContent = "Error: " + (err.message || "Microphone access denied.");
+      labelEl.textContent = "Speak";
+      voiceRecording.active = false;
+      voiceRecording.mode = null;
+      micBtn.disabled = false;
+    });
+});
+
 document.getElementById("refresh-suggestions").addEventListener("click", () => {
   refreshAll();
 });
@@ -565,21 +891,29 @@ function renderGoalsForm(data) {
   const goals = getGoals(data);
   const storyEl = document.getElementById("goal-story");
   if (storyEl) storyEl.value = goals.goalStory || "";
-  
+
   const preview = document.getElementById("analyzed-goals-preview");
-  if (preview && goals.calorieGoal !== DEFAULT_CALORIE_GOAL) {
-    preview.classList.remove("hidden");
-    document.getElementById("preview-calories").textContent = goals.calorieGoal;
-    document.getElementById("preview-protein").textContent = goals.proteinGoal;
-    document.getElementById("preview-activity").textContent = goals.activityGoal;
+  if (preview) {
+    if (data.goals != null) {
+      preview.classList.remove("hidden");
+      const pc = document.getElementById("preview-calories");
+      const pp = document.getElementById("preview-protein");
+      const pa = document.getElementById("preview-activity");
+      if (pc) pc.textContent = goals.calorieGoal;
+      if (pp) pp.textContent = goals.proteinGoal;
+      if (pa) pa.textContent = goals.activityGoal;
+    } else {
+      preview.classList.add("hidden");
+    }
   }
 }
 
-document.getElementById("goals-form").addEventListener("submit", async (e) => {
+document.getElementById("goals-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const storyEl = document.getElementById("goal-story");
   const statusEl = document.getElementById("goals-status");
   const submitBtn = document.getElementById("goals-submit-btn");
+  if (!storyEl || !statusEl || !submitBtn) return;
   const story = storyEl.value.trim();
 
   if (!story) {
@@ -596,7 +930,7 @@ document.getElementById("goals-form").addEventListener("submit", async (e) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ story })
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Analysis failed.");
 
     const appData = loadData();
@@ -690,13 +1024,24 @@ function refreshAll() {
 }
 
 function syncFromServer() {
+  if (mongodbAvailable === false) return;
   fetch(`${API_BASE}/api/data`, { method: "GET", credentials: "include" })
-    .then((res) => (res.ok ? res.json() : null))
+    .then((res) => {
+      if (!res.ok && res.status === 503) setMongodbAvailable(false);
+      return res.ok ? res.json() : null;
+    })
     .then((payload) => {
-      if (payload && (Object.keys(payload.diet || {}).length > 0 || Object.keys(payload.activity || {}).length > 0 || payload.goals != null)) {
-        const data = { 
-          diet: payload.diet || {}, 
-          activity: payload.activity || {}, 
+      if (payload) setMongodbAvailable(true);
+      const hasData =
+        payload &&
+        (Object.keys(payload.diet || {}).length > 0 ||
+          Object.keys(payload.activity || {}).length > 0 ||
+          payload.goals != null ||
+          (payload.goalStory && String(payload.goalStory).trim().length > 0));
+      if (hasData) {
+        const data = {
+          diet: payload.diet || {},
+          activity: payload.activity || {},
           goals: payload.goals ?? null,
           goalStory: payload.goalStory || ""
         };
@@ -704,7 +1049,7 @@ function syncFromServer() {
         refreshAll();
       }
     })
-    .catch(() => {});
+    .catch(() => setMongodbAvailable(false));
 }
 
 /* ElevenLabs voice: read text aloud, with stop control */
@@ -731,18 +1076,18 @@ function stopCurrentAudio() {
   if (stopBtn) stopBtn.classList.add("hidden");
 }
 
-async function speakText(text, buttonEl) {
+async function speakText(text, buttonEl, onPlaybackEnd) {
   if (!text || !text.trim()) return;
   stopCurrentAudio();
   const btn = buttonEl;
-  const labelEl = btn?.querySelector(".btn-voice-label");
+  const labelEl = btn?.querySelector(".btn-voice-label") || btn?.querySelector(".talk-calixo-mic-label");
   if (btn) {
     btn.disabled = true;
     if (labelEl) {
-      btn.dataset.originalText = labelEl.textContent;
+      if (btn.dataset.originalText === undefined) btn.dataset.originalText = labelEl.textContent;
       labelEl.textContent = "Generating…";
     } else {
-      btn.dataset.originalText = btn.textContent;
+      if (btn.dataset.originalText === undefined) btn.dataset.originalText = btn.textContent;
       btn.textContent = "Generating…";
     }
   }
@@ -768,8 +1113,12 @@ async function speakText(text, buttonEl) {
     audio.onended = () => {
       URL.revokeObjectURL(url);
       stopCurrentAudio();
+      if (typeof onPlaybackEnd === "function") onPlaybackEnd();
     };
-    audio.onerror = () => stopCurrentAudio();
+    audio.onerror = () => {
+      stopCurrentAudio();
+      if (typeof onPlaybackEnd === "function") onPlaybackEnd();
+    };
     await audio.play();
   } catch (err) {
     if (typeof console !== "undefined" && console.error) console.error(err);
@@ -781,6 +1130,7 @@ async function speakText(text, buttonEl) {
         else btn.textContent = btn.dataset.originalText;
       }
       if (btn) btn.disabled = false;
+      if (typeof onPlaybackEnd === "function") onPlaybackEnd();
     }, 2000);
   }
 }
@@ -830,10 +1180,18 @@ document.getElementById("voice-briefing-btn").addEventListener("click", async ()
         goalStory: goals.goalStory
       })
     });
-    const result = await res.json();
+    const result = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(result.error || "Briefing failed.");
-    
-    await speakText(result.script, btn);
+
+    const script = (result.script || "").trim();
+    if (!script) {
+      labelEl.textContent = origText;
+      btn.disabled = false;
+      return;
+    }
+    btn.dataset.originalText = origText;
+    labelEl.textContent = "Generating…";
+    await speakText(script, btn);
   } catch (err) {
     labelEl.textContent = "Error";
     setTimeout(() => {
@@ -844,8 +1202,7 @@ document.getElementById("voice-briefing-btn").addEventListener("click", async ()
 });
 
 document.getElementById("voice-suggestions-btn").addEventListener("click", () => {
-  const data = loadData();
-  const suggestions = getSuggestions(data);
+  const suggestions = lastRenderedSuggestions.length ? lastRenderedSuggestions : getSuggestions(loadData());
   const text =
     suggestions.length === 0
       ? "Log some food and activity to get suggestions."
@@ -1118,6 +1475,411 @@ async function handleSpeechActivity() {
 document.getElementById("speech-food-btn").addEventListener("click", handleSpeechFood);
 document.getElementById("speech-activity-btn").addEventListener("click", handleSpeechActivity);
 
+/* Chat: separate storage for Goals (Discussion and Goals tab) vs Talk (Talk to Calixo voice) */
+const CHAT_STORAGE_KEY_GOALS = "calixolympics_goals_chat";
+const CHAT_STORAGE_KEY_TALK = "calixolympics_talk_chat";
+const CALIXO_WELCOME = "Hi! I'm Calixo, your fitness coach. Tell me what you'd like to achieve—lose weight, get stronger, eat better—and I'll help you set goals and give you personalized suggestions here and in your Suggestions tab.";
+
+function getGoalsChatMessages() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY_GOALS);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveGoalsChatMessages(messages) {
+  localStorage.setItem(CHAT_STORAGE_KEY_GOALS, JSON.stringify(messages));
+}
+
+function getTalkChatMessages() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY_TALK);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTalkChatMessages(messages) {
+  localStorage.setItem(CHAT_STORAGE_KEY_TALK, JSON.stringify(messages));
+}
+
+function openChatPanel() {
+  const panel = document.getElementById("chat-panel");
+  if (panel) panel.classList.remove("hidden");
+  const messages = getGoalsChatMessages();
+  if (messages.length === 0) {
+    const welcome = [{ role: "assistant", content: CALIXO_WELCOME }];
+    saveGoalsChatMessages(welcome);
+    renderGoalsChatMessages(welcome);
+  } else {
+    renderGoalsChatMessages(messages);
+  }
+  document.getElementById("chat-input")?.focus();
+}
+
+function closeChatPanel() {
+  document.getElementById("chat-panel")?.classList.add("hidden");
+}
+
+function renderGoalsChatMessages(messages) {
+  const html = messages
+    .map((m) => {
+      if (m.role === "user") {
+        return `<div class="chat-message user">${escapeHtml(m.content)}</div>`;
+      }
+      return `<div class="chat-message assistant"><span class="chat-message-name">Calixo</span> ${escapeHtml(m.content)}</div>`;
+    })
+    .join("");
+  const panelEl = document.getElementById("chat-messages");
+  const inlineEl = document.getElementById("goals-chat-messages");
+  if (panelEl) {
+    panelEl.innerHTML = html;
+    panelEl.scrollTop = panelEl.scrollHeight;
+  }
+  if (inlineEl) {
+    inlineEl.innerHTML = html;
+    inlineEl.scrollTop = inlineEl.scrollHeight;
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function getChatContext() {
+  const data = loadData();
+  const goals = getGoals(data);
+  return {
+    dietEntries: getDietToday(data).map((e) => ({ name: e.name, calories: e.calories, protein: e.protein })),
+    activityEntries: getActivityToday(data).map((e) => ({ type: e.type, duration: e.duration, intensity: e.intensity })),
+    goals: { calorieGoal: goals.calorieGoal, proteinGoal: goals.proteinGoal, activityGoal: goals.activityGoal },
+    goalStory: goals.goalStory || ""
+  };
+}
+
+async function tryLogFoodAndActivityFromTranscript(transcript) {
+  const t = (transcript || "").trim();
+  if (!t) return { foodCount: 0, activityCount: 0 };
+  let foodCount = 0;
+  let activityCount = 0;
+  try {
+    const foodRes = await fetch(`${API_BASE}/api/parse-speech`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "food", transcript: t })
+    });
+    const foodData = await foodRes.json().catch(() => ({}));
+    if (foodRes.ok && Array.isArray(foodData.items) && foodData.items.length > 0) {
+      const appData = loadData();
+      for (const item of foodData.items) {
+        const body = getBodyForFoodItem(item);
+        const nutRes = await fetch(`${API_BASE}/api/food-nutrition`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const nut = await nutRes.json().catch(() => ({}));
+        if (!nutRes.ok) continue;
+        addDietEntry(appData, {
+          name: nut.name || item.name,
+          calories: String(nut.calories ?? 0),
+          protein: String(nut.protein ?? 0),
+          carbs: String(nut.carbs ?? 0),
+          fat: String(nut.fat ?? 0)
+        });
+        foodCount++;
+      }
+    }
+  } catch (_) {}
+  try {
+    const actRes = await fetch(`${API_BASE}/api/parse-speech`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "activity", transcript: t })
+    });
+    const actData = await actRes.json().catch(() => ({}));
+    if (actRes.ok && Array.isArray(actData.activities) && actData.activities.length > 0) {
+      const appData = loadData();
+      for (const a of actData.activities) {
+        addActivityEntry(appData, {
+          type: a.type || "other",
+          duration: String(a.duration || 0),
+          intensity: a.intensity || "moderate"
+        });
+        activityCount++;
+      }
+    }
+  } catch (_) {}
+  if (foodCount > 0 || activityCount > 0) refreshAll();
+  return { foodCount, activityCount };
+}
+
+function applySuggestedGoals(payload) {
+  if (!payload || !payload.goalStory) return;
+  const data = loadData();
+  saveGoals(data, {
+    calorieGoal: payload.calorieGoal ?? 2000,
+    proteinGoal: payload.proteinGoal ?? 50,
+    activityGoal: payload.activityGoal ?? 30
+  }, payload.goalStory || "");
+  refreshAll();
+}
+
+async function runVoiceConversationTurn(transcript) {
+  const trimmed = (transcript || "").trim();
+  if (!trimmed) return null;
+  const messages = getTalkChatMessages();
+  messages.push({ role: "user", content: trimmed });
+  saveTalkChatMessages(messages);
+  try {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, context: getChatContext() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Chat failed.");
+    const reply = (data.reply || "").trim();
+    messages.push({ role: "assistant", content: reply });
+    saveTalkChatMessages(messages);
+    if (data.suggestedGoals && data.suggestedGoals.goalStory) applySuggestedGoals(data.suggestedGoals);
+    return reply || null;
+  } catch (err) {
+    const fallback = "Sorry, I couldn't respond right now. Please try again.";
+    messages.push({ role: "assistant", content: fallback });
+    saveTalkChatMessages(messages);
+    return fallback;
+  }
+}
+
+async function sendChatMessage(text, source) {
+  const input = source === "goals" ? document.getElementById("goals-chat-input") : document.getElementById("chat-input");
+  const statusEl = source === "goals" ? document.getElementById("goals-chat-status") : document.getElementById("chat-status");
+  const sendBtn = source === "goals" ? document.getElementById("goals-chat-send") : document.getElementById("chat-send");
+  const micBtn = source === "goals" ? document.getElementById("goals-chat-mic") : document.getElementById("chat-mic");
+  const trimmed = (text || "").trim();
+  if (!trimmed) return;
+
+  if (document.getElementById("chat-input")) document.getElementById("chat-input").value = "";
+  if (document.getElementById("goals-chat-input")) document.getElementById("goals-chat-input").value = "";
+  const messages = getGoalsChatMessages();
+  messages.push({ role: "user", content: trimmed });
+  saveGoalsChatMessages(messages);
+  renderGoalsChatMessages(messages);
+
+  if (sendBtn) sendBtn.disabled = true;
+  if (micBtn) micBtn.disabled = true;
+  const statusElPanel = document.getElementById("chat-status");
+  const statusElGoals = document.getElementById("goals-chat-status");
+
+  const { foodCount, activityCount } = await tryLogFoodAndActivityFromTranscript(trimmed);
+  if (foodCount > 0 || activityCount > 0) {
+    const parts = [];
+    if (foodCount > 0) parts.push(foodCount === 1 ? "1 food" : foodCount + " foods");
+    if (activityCount > 0) parts.push(activityCount === 1 ? "1 activity" : activityCount + " activities");
+    const loggedMsg = "Logged " + parts.join(", ") + ". Getting reply…";
+    if (statusElPanel) statusElPanel.textContent = loggedMsg;
+    if (statusElGoals) statusElGoals.textContent = loggedMsg;
+  } else {
+    if (statusElPanel) statusElPanel.textContent = "Calixo is thinking…";
+    if (statusElGoals) statusElGoals.textContent = "Calixo is thinking…";
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, context: getChatContext() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Chat failed.");
+
+    messages.push({ role: "assistant", content: data.reply || "" });
+    saveGoalsChatMessages(messages);
+    renderGoalsChatMessages(messages);
+
+    if (data.suggestedGoals && data.suggestedGoals.goalStory) applySuggestedGoals(data.suggestedGoals);
+  } catch (err) {
+    const errMsg = "Error: " + (err.message || "Could not send.");
+    if (statusElPanel) statusElPanel.textContent = errMsg;
+    if (statusElGoals) statusElGoals.textContent = errMsg;
+    messages.push({ role: "assistant", content: "Sorry, I couldn't respond right now. Please try again." });
+    saveGoalsChatMessages(messages);
+    renderGoalsChatMessages(messages);
+  } finally {
+    if (statusElPanel) statusElPanel.textContent = "";
+    if (statusElGoals) statusElGoals.textContent = "";
+    const sendBtnPanel = document.getElementById("chat-send");
+    const sendBtnGoals = document.getElementById("goals-chat-send");
+    if (sendBtnPanel) sendBtnPanel.disabled = false;
+    if (sendBtnGoals) sendBtnGoals.disabled = false;
+    const micPanel = document.getElementById("chat-mic");
+    const micGoals = document.getElementById("goals-chat-mic");
+    if (micPanel) micPanel.disabled = false;
+    if (micGoals) micGoals.disabled = false;
+  }
+}
+
+document.getElementById("chat-calixo-open")?.addEventListener("click", openChatPanel);
+document.getElementById("chat-panel-close").addEventListener("click", closeChatPanel);
+
+function bindChatSend(inputId, sendBtnId, source) {
+  const input = document.getElementById(inputId);
+  const sendBtn = document.getElementById(sendBtnId);
+  if (!input || !sendBtn) return;
+  sendBtn.addEventListener("click", () => sendChatMessage(input.value, source));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage(input.value, source);
+    }
+  });
+}
+bindChatSend("chat-input", "chat-send", "panel");
+bindChatSend("goals-chat-input", "goals-chat-send", "goals");
+
+/* Chat voice: record then send transcript as message */
+function setupChatMic(micId, labelId, statusId, source) {
+  const micBtn = document.getElementById(micId);
+  if (!micBtn) return;
+  micBtn.addEventListener("click", async function chatMicClick() {
+    const labelEl = document.getElementById(labelId);
+    const statusEl = document.getElementById(statusId);
+    if (voiceRecording.active && voiceRecording.mode === "chat") {
+      if (labelEl) labelEl.textContent = "Processing…";
+      if (statusEl) statusEl.textContent = "Transcribing…";
+      let blob;
+      try {
+        blob = await stopVoiceRecording();
+      } catch (_) {
+        if (labelEl) labelEl.textContent = "Speak";
+        voiceRecording.mode = null;
+        if (statusEl) statusEl.textContent = "";
+        return;
+      }
+      if (!blob || blob.size < 500) {
+        if (labelEl) labelEl.textContent = "Speak";
+        if (statusEl) statusEl.textContent = "No audio captured. Try again.";
+        return;
+      }
+      try {
+        const transcript = await transcribeAudio(blob);
+        if (transcript) await sendChatMessage(transcript, source);
+      } catch (err) {
+        if (statusEl) statusEl.textContent = "Error: " + (err.message || "Transcription failed.");
+      }
+      if (labelEl) labelEl.textContent = "Speak";
+      if (statusEl) statusEl.textContent = "";
+      return;
+    }
+    voiceRecording.mode = "chat";
+    if (labelEl) labelEl.textContent = "Stop";
+    if (statusEl) statusEl.textContent = "Listening… Click again when done.";
+    micBtn.disabled = true;
+    startVoiceRecording()
+      .then((blobOrNull) => {
+        if (blobOrNull) return;
+        micBtn.disabled = false;
+      })
+      .catch((err) => {
+        if (statusEl) statusEl.textContent = "Error: " + (err.message || "Microphone access denied.");
+        if (labelEl) labelEl.textContent = "Speak";
+        voiceRecording.active = false;
+        voiceRecording.mode = null;
+        micBtn.disabled = false;
+      });
+  });
+}
+setupChatMic("chat-mic", "chat-mic-label", "chat-status", "panel");
+setupChatMic("goals-chat-mic", "goals-chat-mic-label", "goals-chat-status", "goals");
+
+/* Talk to Calixo: voice-only conversation (ElevenLabs STT → optional food/activity log → chat API → ElevenLabs TTS) */
+(function initTalkCalixoMic() {
+  const micBtn = document.getElementById("talk-calixo-mic");
+  const labelEl = document.getElementById("talk-calixo-mic-label");
+  const statusEl = document.getElementById("talk-calixo-status");
+  const setButtonLabel = (text) => { if (labelEl) labelEl.textContent = text; };
+  const setStatus = (text) => { if (statusEl) statusEl.textContent = text; };
+  const resetIdle = () => { setButtonLabel("Tap to speak"); micBtn.disabled = false; setStatus(""); };
+
+  if (!micBtn) return;
+  micBtn.addEventListener("click", async function talkCalixoMicClick() {
+    if (voiceRecording.active && voiceRecording.mode === "talk-calixo") {
+      setButtonLabel("Tap to speak");
+      setStatus("Transcribing…");
+      let blob;
+      try {
+        blob = await stopVoiceRecording();
+      } catch (_) {
+        voiceRecording.mode = null;
+        resetIdle();
+        return;
+      }
+      if (!blob || blob.size < 500) {
+        setStatus("No audio captured. Try again.");
+        resetIdle();
+        return;
+      }
+      micBtn.disabled = true;
+      try {
+        const transcript = await transcribeAudio(blob);
+        if (!transcript) {
+          setStatus("No speech detected. Try again.");
+          resetIdle();
+          return;
+        }
+        setStatus("Checking for food or activity…");
+        const { foodCount, activityCount } = await tryLogFoodAndActivityFromTranscript(transcript);
+        if (foodCount > 0 || activityCount > 0) {
+          const parts = [];
+          if (foodCount > 0) parts.push(foodCount === 1 ? "1 food" : foodCount + " foods");
+          if (activityCount > 0) parts.push(activityCount === 1 ? "1 activity" : activityCount + " activities");
+          setStatus("Logged " + parts.join(", ") + ". Getting Calixo…");
+        } else {
+          setStatus("Calixo is thinking…");
+        }
+        const reply = await runVoiceConversationTurn(transcript);
+        setStatus("Calixo is speaking…");
+        if (reply) {
+          await speakText(reply, null, () => { resetIdle(); });
+        } else {
+          resetIdle();
+        }
+      } catch (err) {
+        setStatus("Error: " + (err.message || "Something went wrong."));
+        resetIdle();
+      }
+      return;
+    }
+    voiceRecording.mode = "talk-calixo";
+    setButtonLabel("Tap when done");
+    setStatus("Listening… Tap again when you finish.");
+    micBtn.disabled = true;
+    startVoiceRecording()
+      .then((blobOrNull) => {
+        if (blobOrNull) return;
+        micBtn.disabled = false;
+      })
+      .catch((err) => {
+        setStatus("Error: " + (err.message || "Microphone access denied."));
+        setButtonLabel("Tap to speak");
+        voiceRecording.active = false;
+        voiceRecording.mode = null;
+        micBtn.disabled = false;
+      });
+  });
+})();
+
+fetchHealth();
 initTabs();
 refreshAll();
 syncFromServer();

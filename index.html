@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="CalixOlympics – Track diet and activity, set goals with Calixo, and get AI-powered suggestions.">
   <title>CalixOlympics – Diet & Activity</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -22,24 +23,28 @@
           <span>Stop</span>
         </button>
       </div>
-      <nav class="nav">
-        <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
-        <button class="nav-btn" data-tab="goals">Goals</button>
-        <button class="nav-btn" data-tab="diet">Log food</button>
-        <button class="nav-btn" data-tab="activity">Log activity</button>
-        <button class="nav-btn" data-tab="photo">Photo food</button>
-        <button class="nav-btn" data-tab="suggestions">Suggestions</button>
+      <nav class="nav" role="tablist" aria-label="Main sections">
+        <button class="nav-btn active" data-tab="dashboard" role="tab" aria-selected="true" aria-controls="dashboard" id="nav-dashboard">Dashboard</button>
+        <button class="nav-btn" data-tab="goals" role="tab" aria-selected="false" aria-controls="goals" id="nav-goals">Goals</button>
+        <button class="nav-btn" data-tab="diet" role="tab" aria-selected="false" aria-controls="diet" id="nav-diet">Food</button>
+        <button class="nav-btn" data-tab="activity" role="tab" aria-selected="false" aria-controls="activity" id="nav-activity">Activity</button>
+        <button class="nav-btn" data-tab="photo" role="tab" aria-selected="false" aria-controls="photo" id="nav-photo">Photo</button>
+        <button class="nav-btn" data-tab="suggestions" role="tab" aria-selected="false" aria-controls="suggestions" id="nav-suggestions">Suggestions</button>
+        <button type="button" class="nav-btn nav-btn-talk" data-tab="talk-calixo" role="tab" aria-selected="false" aria-controls="talk-calixo" id="nav-talk" title="Talk to Calixo (voice)">
+          <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+          <span>Talk</span>
+        </button>
       </nav>
     </header>
 
     <main class="main">
-      <section class="tab-panel active" id="dashboard">
-        <h2>Today’s overview</h2>
+      <section class="tab-panel active" id="dashboard" role="tabpanel" aria-labelledby="nav-dashboard">
+        <h2 class="panel-title">Today’s overview</h2>
         <div class="date-display" id="dashboard-date"></div>
         <div class="daily-goal-banner" id="daily-goal-banner">
-          <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+          <div class="daily-goal-banner-header">
             <h3>Today’s goal to reach</h3>
-            <div style="display: flex; gap: 0.5rem;">
+            <div class="daily-goal-banner-actions">
               <button type="button" class="btn btn-voice" id="voice-briefing-btn" title="Get a personalized coach briefing">
                 <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
                 <span class="btn-voice-label">Coach Briefing</span>
@@ -71,21 +76,27 @@
             <h3>Diet</h3>
             <div class="stat-row">
               <span class="stat-label">Calories</span>
-              <span class="stat-value" id="dash-calories">0</span>
-              <span class="stat-target" id="dash-calories-target">/ 2000</span>
+              <span class="stat-value-group">
+                <span class="stat-value" id="dash-calories">0</span>
+                <span class="stat-target" id="dash-calories-target">/ 2000</span>
+              </span>
             </div>
             <div class="stat-row">
               <span class="stat-label">Protein (g)</span>
-              <span class="stat-value" id="dash-protein">0</span>
-              <span class="stat-target" id="dash-protein-target">/ 50</span>
+              <span class="stat-value-group">
+                <span class="stat-value" id="dash-protein">0</span>
+                <span class="stat-target" id="dash-protein-target">/ 50</span>
+              </span>
             </div>
           </div>
           <div class="card activity-card">
             <h3>Activity</h3>
             <div class="stat-row">
               <span class="stat-label">Active minutes</span>
-              <span class="stat-value" id="dash-activity">0</span>
-              <span class="stat-target" id="dash-activity-target">/ 30</span>
+              <span class="stat-value-group">
+                <span class="stat-value" id="dash-activity">0</span>
+                <span class="stat-target" id="dash-activity-target">/ 30</span>
+              </span>
             </div>
             <div class="stat-row">
               <span class="stat-label">Logged sessions</span>
@@ -107,36 +118,55 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="goals">
-        <h2>Your Fitness Journey</h2>
-        <p class="goals-intro">Describe your goals, lifestyle, and what you want to achieve. Our AI will analyze your story to set personalized targets.</p>
-        <form class="form" id="goals-form">
-          <label>
-            <span>Your Fitness Story</span>
-            <textarea id="goal-story" placeholder="e.g. I want to lose 5kg in 2 months. I work a desk job but want to start running 3 times a week. I need to make sure I get enough protein as a vegetarian." rows="5" required></textarea>
-          </label>
-          <div id="analyzed-goals-preview" class="hidden" style="margin-top: 1.5rem; padding: 1.25rem; background: var(--bg-elevated); border-radius: var(--radius-md); border: 1px solid var(--primary-dim);">
-            <h3 style="font-size: 0.9rem; color: var(--primary); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">AI-Analyzed Targets</h3>
-            <div class="stat-row">
-              <span class="stat-label">Daily Calories</span>
-              <span class="stat-value" id="preview-calories">0</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Daily Protein (g)</span>
-              <span class="stat-value" id="preview-protein">0</span>
-            </div>
-            <div class="stat-row">
-              <span class="stat-label">Daily Activity (min)</span>
-              <span class="stat-value" id="preview-activity">0</span>
-            </div>
+      <section class="tab-panel" id="goals" role="tabpanel" aria-labelledby="nav-goals">
+        <h2 class="panel-title">Discussion and Goals</h2>
+        <p class="goals-discussion-intro">Chat with your coach to set and refine your goals. Mention what you ate or what activity you did—Calixo will analyze and log it automatically. When Calixo suggests new targets, they are applied to your goals automatically.</p>
+        <div class="goals-chat-full">
+          <div class="chat-messages goals-chat-messages" id="goals-chat-messages"></div>
+          <div class="chat-input-wrap goals-chat-input-wrap">
+            <input type="text" class="chat-input" id="goals-chat-input" placeholder="Type or use the mic…" maxlength="500" autocomplete="off">
+            <button type="button" class="btn btn-voice chat-send" id="goals-chat-send" title="Send">Send</button>
+            <button type="button" class="btn btn-voice chat-mic" id="goals-chat-mic" title="Speak">
+              <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+              <span class="btn-voice-label" id="goals-chat-mic-label">Speak</span>
+            </button>
           </div>
-          <p class="goals-status" id="goals-status" style="margin-top: 1rem; font-size: 0.9rem; color: var(--accent);"></p>
-          <button type="submit" class="btn btn-primary" id="goals-submit-btn">Analyze & Save Goals</button>
-        </form>
+          <p class="chat-status" id="goals-chat-status"></p>
+        </div>
       </section>
 
-      <section class="tab-panel" id="diet">
-        <h2>Log food</h2>
+      <section class="tab-panel" id="talk-calixo" role="tabpanel" aria-labelledby="nav-talk">
+        <h2 class="panel-title">Talk to Calixo</h2>
+        <p class="talk-calixo-intro">Talk to Calixo with voice only. You can chat about goals, or say what you ate or what activity you did—food and activity will be logged automatically. Tap the mic to speak, then tap again when done.</p>
+        <div class="talk-calixo-voice">
+          <button type="button" class="btn-talk-calixo-mic" id="talk-calixo-mic" title="Tap to speak, tap again when done" aria-label="Hold to speak">
+            <svg class="icon-mic-large" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+            <span class="talk-calixo-mic-label" id="talk-calixo-mic-label">Tap to speak</span>
+          </button>
+          <p class="talk-calixo-status" id="talk-calixo-status"></p>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="diet" role="tabpanel" aria-labelledby="nav-diet">
+        <div class="check-food-section">
+          <h2 class="panel-title">Check if a food fits your goals</h2>
+          <p class="check-food-intro">Enter or say a food (e.g. chicken breast 200g, a slice of pizza). We’ll tell you if it matches your goals and suggestions.</p>
+          <div class="check-food-row">
+            <input type="text" id="check-food-input" class="check-food-input" placeholder="e.g. chicken breast 200g, a slice of pizza" maxlength="200" autocomplete="off">
+            <button type="button" class="btn btn-primary" id="check-food-btn">Check</button>
+            <button type="button" class="btn btn-voice" id="check-food-mic" title="Speak the food to check">
+              <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+              <span class="btn-voice-label" id="check-food-mic-label">Speak</span>
+            </button>
+          </div>
+          <p class="check-food-status" id="check-food-status"></p>
+          <div class="check-food-result hidden" id="check-food-result">
+            <p class="check-food-verdict" id="check-food-verdict"></p>
+            <p class="check-food-assessment" id="check-food-assessment"></p>
+          </div>
+        </div>
+
+        <h2 class="panel-title">Log food</h2>
         <p class="diet-intro">Enter the food name and amount (grams or quantity). Macros are looked up automatically.</p>
         <form class="form" id="diet-form">
           <label>
@@ -168,14 +198,33 @@
           </button>
         </div>
         <p class="voice-status" id="speech-food-status"></p>
+
         <div class="today-entries">
           <h3>Today’s food log</h3>
           <ul class="entries-list" id="diet-entries"></ul>
         </div>
       </section>
 
-      <section class="tab-panel" id="activity">
-        <h2>Log activity</h2>
+      <section class="tab-panel" id="activity" role="tabpanel" aria-labelledby="nav-activity">
+        <div class="check-activity-section">
+          <h2 class="panel-title">Check if an activity fits your goals</h2>
+          <p class="check-activity-intro">Enter or say an activity (e.g. 30 min walk, 1 hour gym). We’ll match it to your goals and give a short analysis.</p>
+          <div class="check-activity-row">
+            <input type="text" id="check-activity-input" class="check-activity-input" placeholder="e.g. 30 min walk, 1 hour gym" maxlength="200" autocomplete="off">
+            <button type="button" class="btn btn-primary" id="check-activity-btn">Check</button>
+            <button type="button" class="btn btn-voice" id="check-activity-mic" title="Speak the activity to check">
+              <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+              <span class="btn-voice-label" id="check-activity-mic-label">Speak</span>
+            </button>
+          </div>
+          <p class="check-activity-status" id="check-activity-status"></p>
+          <div class="check-activity-result hidden" id="check-activity-result">
+            <p class="check-activity-verdict" id="check-activity-verdict"></p>
+            <p class="check-activity-assessment" id="check-activity-assessment"></p>
+          </div>
+        </div>
+
+        <h2 class="panel-title">Log activity</h2>
         <form class="form" id="activity-form">
           <label>
             <span>Activity type</span>
@@ -215,8 +264,8 @@
         </div>
       </section>
 
-      <section class="tab-panel" id="photo">
-        <h2>Photo food</h2>
+      <section class="tab-panel" id="photo" role="tabpanel" aria-labelledby="nav-photo">
+        <h2 class="panel-title">Photo food</h2>
         <p class="photo-intro">Upload a photo of your meal. We’ll detect what’s in it and read out the nutrition.</p>
         <div class="photo-upload-zone" id="photo-upload-zone">
           <input type="file" id="photo-input" accept="image/*" class="photo-input">
@@ -231,8 +280,8 @@
         <p class="photo-note">Uses AI to estimate. For exact values, log food by name and grams.</p>
       </section>
 
-      <section class="tab-panel" id="suggestions">
-        <h2>Suggestions</h2>
+      <section class="tab-panel" id="suggestions" role="tabpanel" aria-labelledby="nav-suggestions">
+        <h2 class="panel-title">Suggestions</h2>
         <p class="suggestions-intro">Based on your diet and activity today.</p>
         <div class="voice-actions">
           <button type="button" class="btn btn-voice" id="voice-suggestions-btn" title="Read suggestions aloud">
@@ -244,6 +293,23 @@
         <button class="btn btn-secondary" id="refresh-suggestions">Refresh</button>
       </section>
     </main>
+
+    <aside class="chat-panel hidden" id="chat-panel" aria-label="Goals Discussion">
+      <div class="chat-panel-header">
+        <h2 class="chat-panel-title">Goals Discussion</h2>
+        <button type="button" class="chat-panel-close" id="chat-panel-close" aria-label="Close chat">&times;</button>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-wrap">
+        <input type="text" class="chat-input" id="chat-input" placeholder="Type or use the mic…" maxlength="500" autocomplete="off">
+        <button type="button" class="btn btn-voice chat-send" id="chat-send" title="Send">Send</button>
+        <button type="button" class="btn btn-voice chat-mic" id="chat-mic" title="Speak">
+          <svg class="icon-mic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+          <span class="btn-voice-label" id="chat-mic-label">Speak</span>
+        </button>
+      </div>
+      <p class="chat-status" id="chat-status"></p>
+    </aside>
   </div>
   <script src="script.js"></script>
 </body>

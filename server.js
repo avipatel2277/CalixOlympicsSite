@@ -27,20 +27,33 @@ const USE_MONGODB = MONGODB_URI.length > 0;
 
 let db = null;
 if (USE_MONGODB) {
+  const connectMongo = (options = {}) => {
+    const opts = { serverSelectionTimeoutMS: 10000, ...options };
+    return MongoClient.connect(MONGODB_URI, opts)
+      .then((client) => {
+        db = client.db();
+        console.log("MongoDB connected.");
+        return client;
+      })
+      .catch((err) => {
+        console.error("MongoDB connection failed:", err.message);
+        if (err.message && err.message.includes("SSL") && MONGODB_URI.startsWith("mongodb+srv://")) {
+          console.error("Tip: SSL error 80 on Windows often fixes by using the STANDARD connection string in .env (see .env.example).");
+        }
+        db = null;
+        return null;
+      });
+  };
   if (MONGODB_URI.startsWith("mongodb+srv://")) {
     try {
       require("dns").setServers(["8.8.8.8", "1.1.1.1"]);
     } catch (_) {}
-  }
-  MongoClient.connect(MONGODB_URI)
-    .then((client) => {
-      db = client.db();
-      console.log("MongoDB connected.");
-    })
-    .catch((err) => {
-      console.error("MongoDB connection failed:", err.message);
-      db = null;
+    connectMongo({ autoSelectFamily: false }).then((client) => {
+      if (!client) connectMongo({});
     });
+  } else {
+    connectMongo();
+  }
 }
 
 app.use(cors({ origin: true, credentials: true }));
@@ -220,7 +233,7 @@ function parseNutritionFromText(text) {
 
 app.post("/api/food-nutrition", async (req, res) => {
   if (!OPENROUTER_API_KEY) {
-    return res.status(503).json({ error: "OpenRouter API key not configured. Set OPENROUTER_API_KEY in .env" });
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable nutrition lookup." });
   }
   const { foodName, grams, quantity } = req.body;
   const name = (foodName || "").trim();
@@ -297,10 +310,179 @@ function callOpenRouter(messages, maxTokens = 500) {
   });
 }
 
+const CALIXO_SYSTEM = `You are Calixo, a friendly and knowledgeable fitness and nutrition coach in the CalixOlympics app. You use the user's current data (today's food, activity, and goals) to give smart, personalized responses.
+
+PERSONALITY:
+- Warm and concise. Reply in 2–5 sentences unless they ask for more.
+- Always reference their actual numbers: e.g. "You're at 1200 of 2000 calories—you've got room for a solid dinner" or "You've hit your protein goal already today."
+- When they mention food or activity, acknowledge it and give one relevant tip (e.g. "Chicken and rice is a great combo for protein and carbs" or "20 min run is a solid session—that'll help your cardio").
+- If they're under on calories, protein, or activity, suggest one concrete next step. If they're over, be supportive and suggest balance (e.g. a lighter option or a short walk).
+- Ask at most 1–2 short questions when you need more info to set or refine goals.
+
+GOALS:
+- When they share what they want to achieve (lose weight, build muscle, eat better, etc.), personalize your advice. When you have enough info, add exactly one line at the end of your message (no other text on that line):
+SUGGESTED_GOALS: {"calorieGoal": 2000, "proteinGoal": 50, "activityGoal": 30, "goalStory": "One sentence summary of their goals"}
+- Only include SUGGESTED_GOALS when they've given clear goal-related info. Use sensible defaults (2000 cal, 50g protein, 30 min activity) and goalStory as a one-sentence summary.
+- Use the CONTEXT block below for every reply: cite their current totals vs goals so your advice is specific, not generic.`;
+
+function extractSuggestedGoals(content) {
+  const match = (content || "").match(/SUGGESTED_GOALS:\s*(\{[\s\S]*?\})\s*$/m);
+  if (!match) return null;
+  try {
+    const obj = JSON.parse(match[1].trim());
+    return {
+      calorieGoal: Number(obj.calorieGoal) || 2000,
+      proteinGoal: Number(obj.proteinGoal) || 50,
+      activityGoal: Number(obj.activityGoal) || 30,
+      goalStory: typeof obj.goalStory === "string" ? obj.goalStory.trim() : ""
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function stripSuggestedGoalsLine(content) {
+  return (content || "").replace(/\n?SUGGESTED_GOALS:\s*\{[\s\S]*?\}\s*$/m, "").trim();
+}
+
+/* Chat with Calixo – conversational goal discovery and suggestions */
+app.post("/api/chat", async (req, res) => {
+  if (!OPENROUTER_API_KEY) {
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable Calixo." });
+  }
+  const { messages = [], context = {} } = req.body;
+  const { dietEntries = [], activityEntries = [], goals = {}, goalStory = "" } = context;
+  const calorieGoal = goals.calorieGoal ?? 2000;
+  const proteinGoal = goals.proteinGoal ?? 50;
+  const activityGoal = goals.activityGoal ?? 30;
+
+  const todayCalories = dietEntries.reduce((s, e) => s + (Number(e.calories) || 0), 0);
+  const todayProtein = dietEntries.reduce((s, e) => s + (Number(e.protein) || 0), 0);
+  const todayActivityMins = activityEntries.reduce((s, e) => s + (Number(e.duration) || 0), 0);
+
+  const dietSummary = dietEntries.length
+    ? dietEntries.map((e) => `${e.name}: ${e.calories} cal`).join(", ")
+    : "None logged today.";
+  const activitySummary = activityEntries.length
+    ? activityEntries.map((e) => `${e.type} ${e.duration} min`).join(", ")
+    : "None logged today.";
+
+  const contextBlock = `CONTEXT (use for every reply—reference these numbers so your advice is specific):
+- Goals: ${calorieGoal} cal/day, ${proteinGoal}g protein, ${activityGoal} min activity. Goal story: "${goalStory || "Not set yet."}"
+- Today so far: ${todayCalories} / ${calorieGoal} calories, ${todayProtein} / ${proteinGoal}g protein, ${todayActivityMins} / ${activityGoal} min activity.
+- Today's food: ${dietSummary}
+- Today's activity: ${activitySummary}`;
+
+  const systemContent = CALIXO_SYSTEM + "\n\n" + contextBlock;
+  const chatMessages = [
+    { role: "system", content: systemContent },
+    ...messages.slice(-20)
+  ];
+
+  try {
+    const response = await callOpenRouter(chatMessages, 550);
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: errData.error?.message || "OpenRouter request failed." });
+    }
+    const data = await response.json();
+    const rawContent = (data.choices?.[0]?.message?.content || "").trim();
+    const suggestedGoals = extractSuggestedGoals(rawContent);
+    const reply = stripSuggestedGoalsLine(rawContent);
+    res.json({ reply, suggestedGoals });
+  } catch (err) {
+    console.error("chat error:", err);
+    res.status(500).json({ error: err.message || "Chat failed." });
+  }
+});
+
+/* Check if a food fits the user's goals – text or parsed from speech */
+app.post("/api/check-food", async (req, res) => {
+  if (!OPENROUTER_API_KEY) {
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable food check." });
+  }
+  const { foodDescription = "", context = {} } = req.body;
+  const desc = (foodDescription || "").trim();
+  if (!desc) return res.status(400).json({ error: "Missing 'foodDescription'. Describe the food (e.g. chicken breast 200g, a slice of pizza)." });
+
+  const { goals = {}, goalStory = "", todayCalories = 0, todayProtein = 0 } = context;
+  const calorieGoal = goals.calorieGoal ?? 2000;
+  const proteinGoal = goals.proteinGoal ?? 50;
+
+  const prompt = `You are a nutrition coach. The user is considering eating: "${desc}"
+
+Their daily goals: ${calorieGoal} calories, ${proteinGoal}g protein. Goal context: "${goalStory || "General health."}"
+They have already had today: ${todayCalories} cal, ${todayProtein}g protein.
+
+Estimate the rough nutrition for the food they described (calories and protein). Then say whether it FITS their goals, is a CAUTION (ok in moderation or with a tweak), or they should AVOID/skip for their goals. Be brief (2–4 sentences). Mention portion if relevant.
+
+Reply with ONLY two lines:
+1. One line: VERDICT: fits  OR  VERDICT: caution  OR  VERDICT: avoid
+2. The rest: your short assessment (why it fits, or what to watch, or a better alternative).`;
+
+  try {
+    const response = await callOpenRouter([{ role: "user", content: prompt }], 300);
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: errData.error?.message || "Request failed." });
+    }
+    const data = await response.json();
+    const content = (data.choices?.[0]?.message?.content || "").trim();
+    const verdictMatch = content.match(/VERDICT:\s*(fits|caution|avoid)/i);
+    const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "caution";
+    const assessment = content.replace(/VERDICT:\s*(fits|caution|avoid)\s*/i, "").trim();
+    res.json({ assessment: assessment || content, verdict });
+  } catch (err) {
+    console.error("check-food error:", err);
+    res.status(500).json({ error: err.message || "Check failed." });
+  }
+});
+
+/* Check if an activity fits the user's goals – text or parsed from speech */
+app.post("/api/check-activity", async (req, res) => {
+  if (!OPENROUTER_API_KEY) {
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable activity check." });
+  }
+  const { activityDescription = "", context = {} } = req.body;
+  const desc = (activityDescription || "").trim();
+  if (!desc) return res.status(400).json({ error: "Missing 'activityDescription'. Describe the activity (e.g. 30 min walk, 1 hour gym)." });
+
+  const { goals = {}, goalStory = "", todayActivityMinutes = 0 } = context;
+  const activityGoal = goals.activityGoal ?? 30;
+
+  const prompt = `You are a fitness coach. The user is considering doing: "${desc}"
+
+Their daily activity goal: ${activityGoal} minutes. Goal context: "${goalStory || "General fitness."}"
+They have already done today: ${todayActivityMinutes} minutes of activity.
+
+Interpret the activity (type, rough duration, intensity). Say whether it FITS their goals (great choice, moves them toward target), is a CAUTION (ok but could do more/different), or they should AVOID (e.g. risk of injury, doesn't match goals, or too much). Be brief (2–4 sentences). Mention how it contributes to their goal if relevant.
+
+Reply with ONLY two lines:
+1. One line: VERDICT: fits  OR  VERDICT: caution  OR  VERDICT: avoid
+2. The rest: your short assessment (why it fits, or what to consider, or a better alternative).`;
+
+  try {
+    const response = await callOpenRouter([{ role: "user", content: prompt }], 300);
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: errData.error?.message || "Request failed." });
+    }
+    const data = await response.json();
+    const content = (data.choices?.[0]?.message?.content || "").trim();
+    const verdictMatch = content.match(/VERDICT:\s*(fits|caution|avoid)/i);
+    const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "caution";
+    const assessment = content.replace(/VERDICT:\s*(fits|caution|avoid)\s*/i, "").trim();
+    res.json({ assessment: assessment || content, verdict });
+  } catch (err) {
+    console.error("check-activity error:", err);
+    res.status(500).json({ error: err.message || "Check failed." });
+  }
+});
+
 /* Smart suggestions from today's diet, activity, and goals (OpenRouter) */
 app.post("/api/suggestions", async (req, res) => {
   if (!OPENROUTER_API_KEY) {
-    return res.status(503).json({ error: "OpenRouter API key not configured. Set OPENROUTER_API_KEY in .env" });
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable suggestions." });
   }
   const { dietEntries = [], activityEntries = [], goals = {}, goalStory = "" } = req.body;
   const calorieGoal = goals.calorieGoal ?? 2000;
@@ -365,7 +547,7 @@ Reply with ONLY a JSON array of objects: [{ "text": "...", "type": "success|warn
 
 app.post("/api/parse-speech", async (req, res) => {
   if (!OPENROUTER_API_KEY) {
-    return res.status(503).json({ error: "OpenRouter API key not configured. Set OPENROUTER_API_KEY in .env" });
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable voice logging." });
   }
   const { type, transcript } = req.body;
   const t = (transcript || "").trim();
@@ -429,12 +611,14 @@ Example output: [{"type":"walk","duration":30,"intensity":"moderate"}]`;
 
 app.post("/api/coach-briefing", async (req, res) => {
   if (!OPENROUTER_API_KEY) {
-    return res.status(503).json({ error: "OpenRouter API key not configured." });
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable coach briefing." });
   }
   const { dietEntries = [], activityEntries = [], goals = {}, goalStory = "" } = req.body;
-  
-  const dietSummary = dietEntries.map(e => `${e.name} (${e.calories} cal)`).join(", ");
-  const activitySummary = activityEntries.map(e => `${e.type} for ${e.duration} min`).join(", ");
+  const calorieGoal = goals.calorieGoal ?? 2000;
+  const activityGoal = goals.activityGoal ?? 30;
+
+  const dietSummary = dietEntries.length ? dietEntries.map(e => `${e.name} (${e.calories} cal)`).join(", ") : "Nothing logged yet";
+  const activitySummary = activityEntries.length ? activityEntries.map(e => `${e.type} for ${e.duration} min`).join(", ") : "No activity yet";
   const totalCal = dietEntries.reduce((s, e) => s + (Number(e.calories) || 0), 0);
   const totalActiveMin = activityEntries.reduce((s, e) => s + (Number(e.duration) || 0), 0);
 
@@ -442,21 +626,24 @@ app.post("/api/coach-briefing", async (req, res) => {
 
 USER'S STORY: "${goalStory}"
 TODAY'S PROGRESS:
-- Food: ${dietSummary || "Nothing logged yet"}
-- Activity: ${activitySummary || "No activity yet"}
-- Totals: ${totalCal}/${goals.calorieGoal} cal, ${totalActiveMin}/${goals.activityGoal} min active.
+- Food: ${dietSummary}
+- Activity: ${activitySummary}
+- Totals: ${totalCal}/${calorieGoal} cal, ${totalActiveMin}/${activityGoal} min active.
 
 Provide a personalized, encouraging message that references their specific goals from their story. Keep it concise and ready to be read aloud.`;
 
   try {
     const response = await callOpenRouter([{ role: "user", content: prompt }], 250);
-    if (!response.ok) throw new Error("OpenRouter failed.");
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: errData.error?.message || "OpenRouter request failed." });
+    }
     const data = await response.json();
     const script = (data.choices?.[0]?.message?.content || "").trim();
     res.json({ script });
   } catch (err) {
     console.error("coach-briefing error:", err);
-    res.status(500).json({ error: "Failed to generate briefing." });
+    res.status(500).json({ error: err.message || "Failed to generate briefing." });
   }
 });
 
@@ -521,7 +708,7 @@ Reply in a clear, short paragraph suitable for reading aloud. Include a one-line
 
 app.post("/api/analyze-goals", async (req, res) => {
   if (!OPENROUTER_API_KEY) {
-    return res.status(503).json({ error: "OpenRouter API key not configured." });
+    return res.status(503).json({ error: "AI is not configured. Add OPENROUTER_API_KEY to .env to enable goal analysis." });
   }
   const { story } = req.body;
   if (!story) return res.status(400).json({ error: "Missing 'story'." });
@@ -538,11 +725,20 @@ Reply with ONLY a JSON object: { "calorieGoal": X, "proteinGoal": X, "activityGo
 
   try {
     const response = await callOpenRouter([{ role: "user", content: prompt }], 150);
-    if (!response.ok) throw new Error("OpenRouter request failed.");
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      return res.status(response.status).json({ error: errData.error?.message || "OpenRouter request failed." });
+    }
     const data = await response.json();
     const content = (data.choices?.[0]?.message?.content || "").trim();
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
+    } catch (parseErr) {
+      console.error("analyze-goals parse error:", parseErr);
+      return res.status(422).json({ error: "Could not parse AI response. Try rephrasing your goals." });
+    }
     res.json({
       calorieGoal: Number(parsed.calorieGoal) || 2000,
       proteinGoal: Number(parsed.proteinGoal) || 50,
@@ -550,7 +746,7 @@ Reply with ONLY a JSON object: { "calorieGoal": X, "proteinGoal": X, "activityGo
     });
   } catch (err) {
     console.error("analyze-goals error:", err);
-    res.status(500).json({ error: "Failed to analyze goals." });
+    res.status(500).json({ error: err.message || "Failed to analyze goals." });
   }
 });
 
