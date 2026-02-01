@@ -1,5 +1,5 @@
 {
-  "name": "fittrack",
+  "name": "calixolympics",
   "version": "1.0.0",
   "description": "Fitness app with diet, activity, goals, voice, and photo nutrition",
   "main": "server.js",

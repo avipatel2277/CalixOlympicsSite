@@ -1,4 +1,4 @@
-const STORAGE_KEY = "fittrack_data";
+const STORAGE_KEY = "calixolympics_data";
 const DEFAULT_CALORIE_GOAL = 2000;
 const DEFAULT_PROTEIN_GOAL = 50;
 const DEFAULT_ACTIVITY_GOAL = 30;

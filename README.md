@@ -1,4 +1,4 @@
-# FitTrack
+# CalixOlympics
 
 Fitness app that tracks diet and activity, daily goals, and uses **OpenRouter** with **Google Gemini** for food nutrition (name + grams) and photo-based nutrition. **ElevenLabs** powers read-aloud voice for your dashboard and suggestions.
 

@@ -1,5 +1,5 @@
 /**
- * FitTrack API server – OpenRouter (Gemini) for food nutrition (name + grams) and photo analysis.
+ * CalixOlympics API server – OpenRouter (Gemini) for food nutrition (name + grams) and photo analysis.
  * Set OPENROUTER_API_KEY in .env.
  *
  * Run: node server.js  (or npm start)
@@ -412,7 +412,7 @@ Reply in a clear, short paragraph suitable for reading aloud. Include a one-line
 // Start the server when run directly (e.g. node server.js).
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`FitTrack API running at http://localhost:${PORT}`);
+    console.log(`CalixOlympics API running at http://localhost:${PORT}`);
   });
 }
 
