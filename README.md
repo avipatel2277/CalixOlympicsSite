@@ -2,6 +2,8 @@
 
 Fitness app that tracks diet and activity, daily goals, and uses **OpenRouter** for food nutrition (name + grams), suggestions, voice-log parsing, and photo-based nutrition. Use any OpenRouter model (e.g. Gemini, or Snowflake Arctic when available). **ElevenLabs** powers read-aloud voice. Optional **MongoDB** + anonymous cookie syncs diet/activity/goals to the server (same browser = same data).
 
+*** Made in collaboration with Azam Khan, Aayan Chaudhry, Shyamal Rajkotia, Saboor Faisal and Joy Liu.
+
 ## Features
 
 - **Daily goals** – Set calorie, protein, and activity (minutes) goals. Track progress on the dashboard.
